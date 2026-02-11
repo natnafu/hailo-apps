@@ -37,6 +37,7 @@ class PersonSegmentationCallbackData(app_callback_class):
     def __init__(self, confidence_threshold: float):
         super().__init__()
         self.confidence_threshold = confidence_threshold
+        self.mask_only = False
         self._reported = False
 
 
@@ -49,9 +50,37 @@ class PersonDisplayInstanceSegmentationApp(GStreamerInstanceSegmentationApp):
 
     def __init__(self, app_callback, user_data, parser=None):
         super().__init__(app_callback, user_data, parser=parser)
+
         if getattr(self.options_menu, "video_sink", None):
             self.video_sink = self.options_menu.video_sink
             self.create_pipeline()
+
+    def get_pipeline_string(self):
+        pipeline_string = super().get_pipeline_string()
+
+        # In --mask-only mode, darken the frame before hailooverlay draws masks.
+        # This keeps rendering in GStreamer (no OpenCV window/Qt dependency).
+        if getattr(self.options_menu, "mask_only", False):
+            parts = pipeline_string.split(" ! ")
+            overlay_index = None
+            for i, part in enumerate(parts):
+                if "hailooverlay name=hailo_display_overlay" in part:
+                    overlay_index = i
+                    break
+
+            if overlay_index is not None:
+                parts.insert(
+                    overlay_index,
+                    "videobalance name=mask_only_balance brightness=-1.0 contrast=0.0 saturation=0.0",
+                )
+                pipeline_string = " ! ".join(parts)
+            elif not self.user_data._reported:
+                hailo_logger.warning(
+                    "Could not locate hailo_display_overlay in pipeline; --mask-only won't darken feed"
+                )
+                self.user_data._reported = True
+
+        return pipeline_string
 
 
 def app_callback(pad, info, user_data: PersonSegmentationCallbackData):
@@ -64,6 +93,7 @@ def app_callback(pad, info, user_data: PersonSegmentationCallbackData):
 
     roi = hailo.get_roi_from_buffer(buffer)
     detections = list(roi.get_objects_typed(hailo.HAILO_DETECTION))
+
     person_count = 0
 
     for detection in detections:
@@ -92,7 +122,7 @@ def app_callback(pad, info, user_data: PersonSegmentationCallbackData):
 def build_parser() -> argparse.ArgumentParser:
     parser = get_default_parser()
     parser.description = "Person-only segmentation from RPi camera on Hailo-10H"
-    parser.set_defaults(input="rpi", arch="hailo10h", use_frame=False)
+    parser.set_defaults(input="rpi", arch="hailo10h", use_frame=False, frame_rate=10)
     parser.add_argument(
         "--confidence-threshold",
         type=float,
@@ -104,6 +134,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default="autovideosink",
         help="GStreamer video sink for display (e.g. autovideosink, ximagesink, waylandsink, kmssink)",
+    )
+    parser.add_argument(
+        "--mask-only",
+        action="store_true",
+        help="Display person segmentation masks only (black background, no camera video feed)",
     )
     return parser
 
@@ -117,6 +152,7 @@ def main():
     user_data = PersonSegmentationCallbackData(
         confidence_threshold=confidence_threshold,
     )
+    user_data.mask_only = args.mask_only
 
     app = PersonDisplayInstanceSegmentationApp(app_callback, user_data, parser=parser)
     app.run()
