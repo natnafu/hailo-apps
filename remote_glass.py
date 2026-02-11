@@ -95,6 +95,8 @@ def app_callback(pad, info, user_data):
     detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
     hailo_logger.debug("Number of detections in frame: %d", len(detections))
 
+    # Filter detections to only include people
+    person_detections = []
     for detection in detections:
         label = detection.get_label()
         bbox = detection.get_bbox()
@@ -103,61 +105,69 @@ def app_callback(pad, info, user_data):
             "Detection found: label=%s confidence=%.2f bbox=%s", label, confidence, bbox
         )
 
+        # Only process person detections
         if label == "person":
-            track_id = 0
-            track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
-            if len(track) == 1:
-                track_id = track[0].get_id()
-            hailo_logger.debug("Person detection with track_id=%d", track_id)
+            person_detections.append(detection)
 
-            string_to_print += (
-                f"Detection: ID: {track_id} Label: {label} Confidence: {confidence:.2f}\n"
-            )
+    # Process only person detections
+    for detection in person_detections:
+        label = detection.get_label()
+        bbox = detection.get_bbox()
+        confidence = detection.get_confidence()
+        track_id = 0
+        track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
+        if len(track) == 1:
+            track_id = track[0].get_id()
+        hailo_logger.debug("Person detection with track_id=%d", track_id)
 
-            if user_data.use_frame:
-                masks = detection.get_objects_typed(hailo.HAILO_CONF_CLASS_MASK)
-                hailo_logger.debug("Number of masks for detection: %d", len(masks))
-                if len(masks) != 0:
-                    mask = masks[0]
-                    mask_height = mask.get_height()
-                    mask_width = mask.get_width()
-                    hailo_logger.debug("Mask size: width=%d height=%d", mask_width, mask_height)
+        string_to_print += (
+            f"Detection: ID: {track_id} Label: {label} Confidence: {confidence:.2f}\n"
+        )
 
-                    data = np.array(mask.get_data())
-                    data = data.reshape((mask_height, mask_width))
+        if user_data.use_frame:
+            masks = detection.get_objects_typed(hailo.HAILO_CONF_CLASS_MASK)
+            hailo_logger.debug("Number of masks for detection: %d", len(masks))
+            if len(masks) != 0:
+                mask = masks[0]
+                mask_height = mask.get_height()
+                mask_width = mask.get_width()
+                hailo_logger.debug("Mask size: width=%d height=%d", mask_width, mask_height)
 
-                    roi_width = int(bbox.width() * reduced_width)
-                    roi_height = int(bbox.height() * reduced_height)
-                    resized_mask_data = cv2.resize(
-                        data, (roi_width, roi_height), interpolation=cv2.INTER_LINEAR
+                data = np.array(mask.get_data())
+                data = data.reshape((mask_height, mask_width))
+
+                roi_width = int(bbox.width() * reduced_width)
+                roi_height = int(bbox.height() * reduced_height)
+                resized_mask_data = cv2.resize(
+                    data, (roi_width, roi_height), interpolation=cv2.INTER_LINEAR
+                )
+
+                x_min, y_min = (
+                    int(bbox.xmin() * reduced_width),
+                    int(bbox.ymin() * reduced_height),
+                )
+                x_max, y_max = x_min + roi_width, y_min + roi_height
+
+                y_min = max(y_min, 0)
+                x_min = max(x_min, 0)
+                y_max = min(y_max, reduced_frame.shape[0])
+                x_max = min(x_max, reduced_frame.shape[1])
+
+                if x_max > x_min and y_max > y_min:
+                    hailo_logger.debug(
+                        "Overlaying mask for track_id=%d at (%d,%d) to (%d,%d)",
+                        track_id,
+                        x_min,
+                        y_min,
+                        x_max,
+                        y_max,
                     )
-
-                    x_min, y_min = (
-                        int(bbox.xmin() * reduced_width),
-                        int(bbox.ymin() * reduced_height),
-                    )
-                    x_max, y_max = x_min + roi_width, y_min + roi_height
-
-                    y_min = max(y_min, 0)
-                    x_min = max(x_min, 0)
-                    y_max = min(y_max, reduced_frame.shape[0])
-                    x_max = min(x_max, reduced_frame.shape[1])
-
-                    if x_max > x_min and y_max > y_min:
-                        hailo_logger.debug(
-                            "Overlaying mask for track_id=%d at (%d,%d) to (%d,%d)",
-                            track_id,
-                            x_min,
-                            y_min,
-                            x_max,
-                            y_max,
-                        )
-                        mask_overlay = np.zeros_like(reduced_frame)
-                        color = COLORS[track_id % len(COLORS)]
-                        mask_overlay[y_min:y_max, x_min:x_max] = (
-                            resized_mask_data[: y_max - y_min, : x_max - x_min, np.newaxis] > 0.5
-                        ) * color
-                        reduced_frame = cv2.addWeighted(reduced_frame, 1, mask_overlay, 0.5, 0)
+                    mask_overlay = np.zeros_like(reduced_frame)
+                    color = COLORS[track_id % len(COLORS)]
+                    mask_overlay[y_min:y_max, x_min:x_max] = (
+                        resized_mask_data[: y_max - y_min, : x_max - x_min, np.newaxis] > 0.5
+                    ) * color
+                    reduced_frame = cv2.addWeighted(reduced_frame, 1, mask_overlay, 0.5, 0)
 
     hailo_logger.debug("Frame detections:\n%s", string_to_print)
     print(string_to_print)
